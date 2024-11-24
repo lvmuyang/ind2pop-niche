@@ -92,7 +92,7 @@ save(out, file = paste0("out/",sp_name,"_akde_out.rdata"))
 #----   Perform Analyses - climate change vulnerability   ----#
 # This script estimates individual climate change vulnerabilities
 # aKDEs
-#load("out/akde_out.rdata")
+#load(paste0("out/",sp_name,"_akde_out.rdata"))
 akdes <- out
 
 #----   Perform Analyses   ----#
@@ -187,6 +187,7 @@ dev.off()
 df_out <- do.call("rbind", out)
 
 saveRDS(df_out, paste0("out/",sp_name,"_fut-weights.rds"))
+# df_out <- readRDS(paste0("out/",sp_name,"_fut-weights.rds"))
 
 #----   Perform Analyses   ----#
 #-- Init
@@ -437,28 +438,34 @@ lst_df$future <- sapply(lst_df$`mean LST` + warm, getUDVal_wt, dat = pop_niche$t
 (
   lst_map <- ggplot(data = lst_df) +
     geom_raster(aes(x = x, y = y, fill = `mean LST`)) +
-    scale_fill_viridis_c() +
+    scale_fill_viridis_c(option = "A") +
     theme_void() +
     theme(
-      legend.position = "bottom"
+      legend.position = "bottom",
+      axis.text = element_text()
     )
 )
 (
   lst_map_current <- ggplot(data = lst_df) +
     geom_raster(aes(x = x, y = y, fill = `current`)) +
-    scale_fill_viridis_c() +
+    #scale_fill_gradient() + 
+    #theme_classic() +
+    scale_fill_viridis_c(option = "A") +
     theme_void() +
     theme(
-      legend.position = "bottom"
+      legend.position = "bottom",
+      axis.text = element_text()
     )
 )
 (
   lst_map_future <- ggplot(data = lst_df) +
     geom_raster(aes(x = x, y = y, fill = `future`)) +
-    scale_fill_viridis_c() +
+    scale_fill_viridis_c(option = "A") +
     theme_void() +
     theme(
-      legend.position = "bottom"
+      legend.position = "bottom",
+      #axis.ticks = element_line(linewidth = 1),
+      axis.text = element_text()
     )
 )
 
