@@ -17,6 +17,7 @@ library(ggmap)
 library(patchwork)
 library(ggpubr)
 library(acid)
+library(colorspace)
 
 # Custom Functions
 source("./Ind2pop_function.R")
@@ -34,6 +35,11 @@ sp_name <- "Elephant"
 if(sp_name == "Gadwall") lst <- raster("./modis_lst_mean_2009-2010.tif") 
 if(sp_name == "Elephant") lst <- raster("./modis_lst_mean_2008-2014.tif") 
 values(lst) <- values(lst)*.02-273.15 # convert to C
+
+# background environment for fitting MaxEnt
+background <- values(lst) %>% 
+  na.omit() %>%
+  sample(.,size = 100000, T)
 # convert K to C
 # sp_anno <- sp_anno %>% 
 #   mutate(value = value*.02-273.15)
@@ -92,7 +98,7 @@ save(out, file = paste0("out/",sp_name,"_akde_out.rdata"))
 #----   Perform Analyses - climate change vulnerability   ----#
 # This script estimates individual climate change vulnerabilities
 # aKDEs
-#load(paste0("out/",sp_name,"_akde_out.rdata"))
+load(paste0("out/",sp_name,"_akde_out.rdata"))
 akdes <- out
 
 #----   Perform Analyses   ----#
@@ -123,7 +129,7 @@ for(i in 1:length(inds)){
   # Make LST raster for individual home range
   ind_lst <- lst %>% terra::crop(hr_poly)
   #ind_lst <- lst %>% terra::mask(hr_poly)
-  vals <- values(ind_lst)
+  #vals <- values(ind_lst)
   #vals <- values(lst)
   
   coordinates(dat_ind) <- ~lng + lat
@@ -134,10 +140,12 @@ for(i in 1:length(inds)){
   dat_mods_ind <- dat_mods_ind[!is.na(dat_mods_ind$vals_ind_lst),]
   dat_mods_ind$weights_ind_lst <- dat_mods_ind$weights_ind_lst/sum(dat_mods_ind$weights_ind_lst)
   
+  # kernel density estimator for temperature utilization functions
   d_ind_lst <- density(x = dat_mods_ind$vals_ind_lst, weights = dat_mods_ind$weights_ind_lst,
                        from = 15,
                        to = 45,
                        bw = 0.5)
+  d_ind_lst$y <- d_ind_lst$y/sum(d_ind_lst$y)
   d_ind_lst_track <- density(x = na.omit(dat_ind$value), weights = NULL,
                              from = 15,
                              to = 45,
@@ -146,6 +154,56 @@ for(i in 1:length(inds)){
                    from = 15,
                    to = 45,
                    bw = 0.5)
+  d_lst$y <- d_lst$y/sum(d_lst$y)
+  ###### MaxEnt ######
+  ## Fit MaxEnt with GLM
+  ## sample size of occurrence points
+  n <- 10000 
+  
+  ## create trainning dataset
+  training_prec <- data.frame(occ = 1, temp = sample(x = dat_mods_ind$vals_ind_lst,
+                                                     size = n,
+                                                     replace = T,
+                                                     prob = dat_mods_ind$weights_ind_lst))
+  training_abs <- data.frame(occ = 0, temp = background)
+  training <- rbind.data.frame(training_prec, training_abs)
+  
+  ### Fit models ###
+  training$weight <- 1e-6
+  
+  # number of non-NA cells
+  nc <- cellStats(!is.na(lst), sum)
+  training$weight[training$occ == 0] <- nc / sum(training$occ == 0)
+  
+  best.var <- "temp"
+  ## Set up models
+  formulas <- paste(
+    "occ/weight ~",
+    paste0("poly(", best.var,",3)")
+  )
+  # for these 4 individuals in the Gadwall population, inculding third-order term produices abnormal response curve
+  if(inds[i] %in% c("91784B","91736B","91891B","91801B")){
+    formulas <- paste(
+      "occ/weight ~",
+      paste0("poly(", best.var,",2)")
+    )
+  }
+  
+  mods <- glm(
+    as.formula(formulas),
+    family = poisson(link = log),
+    #family = binomial(),
+    data = training,
+    weights = weight)
+  
+  # truncate range for fitting
+  threshold <- quantile(training$temp,0.01)
+  range_index <- d_ind_lst$x >= threshold & d_ind_lst$x <= max(training$temp)
+  predict_data <- data.frame(temp = d_ind_lst$x[range_index])
+  glm_response <- rep(0,length(d_ind_lst$x))
+  glm_response[range_index] <- predict(mods,predict_data,type='response')
+  glm_response <- glm_response/sum(glm_response)
+  
   par(mfrow=c(1,3))
   plot(lst,main = inds[i])
   plot(hr_poly,add=T)
@@ -154,14 +212,12 @@ for(i in 1:length(inds)){
   plot(dat_ind,add=T,col = 2)
   plot(d_ind_lst$y~d_ind_lst$x,type='l',ylab = "Density", xlab = "LST",main = inds[i])
   lines(d_lst$y~d_lst$x,col=2)
-  lines(d_ind_lst_track$y~d_ind_lst_track$x,col=4)
+  #lines(d_ind_lst_track$y~d_ind_lst_track$x,col=4)
+  lines(glm_response~d_lst$x,col=4)
   
-  f_ind_lst <- d_ind_lst$y/d_lst$y
-  f_ind_lst[is.infinite(f_ind_lst)] <- 0
-  #f_ind_lst <- f_ind_lst/sum(f_ind_lst,na.rm = T)
-  f_ind_lst <- f_ind_lst/max(f_ind_lst,na.rm = T)/3
-  lines(f_ind_lst~d_ind_lst_track$x,col=5)
-  legend("topright",c("CTMM-derived","LST in home range","LST tracked"),lty=1,col=c(1,2,4),cex=1)
+  if(sp_name == "Gadwall") legend("topright",c("CTMM-derived","LST in home range","LST MaxEnt"),lty=1,col=c(1,2,4),cex=1)
+  if(sp_name == "Elephant") legend("topleft",c("CTMM-derived","LST in home range","LST MaxEnt"),lty=1,col=c(1,2,4),cex=1)
+  
   
   
   # plot(f_ind_lst~d_lst$x,col=4,type ='l')
@@ -169,35 +225,42 @@ for(i in 1:length(inds)){
   # Look up the probability associated with some value x.
   # prob <- approx(x)
   
-  cur <- sum(sapply(vals, getUDVal_wt, dat = dat_mods_ind$vals_ind_lst, w = dat_mods_ind$weights_ind_lst), na.rm = T)
-  fut <- sum(sapply(vals+warm, getUDVal_wt, dat = dat_mods_ind$vals_ind_lst, w = dat_mods_ind$weights_ind_lst), na.rm = T)
-  
+  # cur <- sum(sapply(vals, getUDVal_wt, dat = dat_mods_ind$vals_ind_lst, w = dat_mods_ind$weights_ind_lst), na.rm = T)
+  # fut <- sum(sapply(vals+warm, getUDVal_wt, dat = dat_mods_ind$vals_ind_lst, w = dat_mods_ind$weights_ind_lst), na.rm = T)
   # cur <- sum(sapply(vals, getUDVal, dat = dat_ind$value), na.rm = T)
   # fut <- sum(sapply(vals+warm, getUDVal, dat = dat_ind$value), na.rm = T)
   
-  w <- fut/cur
+  #vals <- values(ind_lst)
+  vals <- values(lst)
+  cur <- predict(mods,data.frame(temp = vals),type='response')
+  cur[vals < threshold & vals > max(training$temp)] <- 0
+  fut <- predict(mods,data.frame(temp = vals + warm),type='response')
+  fut[vals+warm < threshold & vals+warm > max(training$temp)] <- 0
+  w <- sum(fut,na.rm = T)/sum(cur,na.rm = T)
   
   out[[i]] <- data.frame(individual = inds[i],
                          fut_weight = w,
                          temp = d_ind_lst$x,
-                         suit = d_ind_lst$y)
+                         suit = glm_response,
+                         suit_rn = d_ind_lst$y)
   
 }  
 dev.off()
 df_out <- do.call("rbind", out)
 
 saveRDS(df_out, paste0("out/",sp_name,"_fut-weights.rds"))
-# df_out <- readRDS(paste0("out/",sp_name,"_fut-weights.rds"))
+df_out <- readRDS(paste0("out/",sp_name,"_fut-weights.rds"))
 
 #----   Perform Analyses   ----#
 #-- Init
 fig_w <- 3.2
 fig_h <- 3.2
-if(sp_name == 'Gadwall') plot_temp_range <- c(20,32)
-if(sp_name == 'Elephant') plot_temp_range <- c(30,42)
+if(sp_name == 'Gadwall') plot_temp_range <- c(18,32);lg_pos <- c(0.9,0.8)
+if(sp_name == 'Elephant') plot_temp_range <- c(30,42);lg_pos <- c(0.2,0.8)
 
 
-df_out <- filter(df_out,individual!="91891B")
+#df_out <- filter(df_out,!individual %in% c("91784B","91736B","91891B","91801B","41731C","91912B")) # Throwing out the gadwall individuals that have abnormal adke ranges
+df_out <- filter(df_out,!individual %in% c("91891B","41731C","91912B")) # Throwing out the gadwall individuals that have abnormal adke ranges
 inds_keep <- unique(df_out$individual)
 
 (sp_dens <- ggplot()+
@@ -247,15 +310,13 @@ pop_niche <- cbind.data.frame(suit = c(current_niche,future_niche),
     ylab("")+
     labs(color = "")+
     theme_classic() +
-    theme(legend.position = c(0.9,0.8)))
+    theme(legend.position = lg_pos))
 
-# Save plot
+ # Save plot
 ggsave(filename = paste0("out/figs/",sp_name,"_pop_dens.png"), pop_dens, width = fig_w, 
        height = fig_h, units = "in")
 
 
-weighted.moments(filter(df_out,individual==inds_keep[i])$temp,current_niche)
-weighted.moments(filter(df_out,individual==inds_keep[i])$temp,future_niche)
 #---- Bivariate Plot ----#
 # for paritioning individual contribution to niche breadth and skewness
 message("Creating bivariate plot...")
@@ -296,6 +357,13 @@ ind_conti <- cbind.data.frame(ind_para,individual_contribution(ind_para))
           legend.text=element_text(size=6),
           legend.title=element_text(size=8))
 )
+
+apply(ind_conti[,c("marginality_sigma2","specialization_sigma2","marginality_skew","specialization_skew","indiv_skew")], 2, sum)
+apply(ind_conti[,c("mu","sigma2_pop","skew_pop")], 2, mean)
+
+weighted.moments(filter(df_out,individual==inds_keep[i])$temp,current_niche)
+weighted.moments(filter(df_out,individual==inds_keep[i])$temp,future_niche)
+
 
 (sp_skew <- ggplot(ind_conti) +
     geom_point(aes(x=marginality_skew, y = specialization_skew,
@@ -434,7 +502,29 @@ colnames(lst_df)[3] <- "mean LST"
 
 lst_df$current <- sapply(lst_df$`mean LST`, getUDVal_wt, dat = pop_niche$temp[pop_niche$time == 'current'], w = pop_niche$suit[pop_niche$time == 'current']/sum(pop_niche$suit[pop_niche$time == 'current']))
 lst_df$future <- sapply(lst_df$`mean LST` + warm, getUDVal_wt, dat = pop_niche$temp[pop_niche$time == 'future'], w = pop_niche$suit[pop_niche$time == 'future']/sum(pop_niche$suit[pop_niche$time == 'future']))
+lst_df$future_sp <- sapply(lst_df$`mean LST` + warm, getUDVal_wt, dat = pop_niche$temp[pop_niche$time == 'current'], w = pop_niche$suit[pop_niche$time == 'current']/sum(pop_niche$suit[pop_niche$time == 'current']))
+lst_df$future_delta <- lst_df$future - lst_df$future_sp
+if(sp_name == "Elephant") lst_df$future_delta[which.max(lst_df$future_delta)] <- 0.05; lst_df$future_delta[which.min(lst_df$future_delta)] <- -0.1
+lst_df$future_delta[which(is.na(lst_df$future_delta))] <- 0
+lst_df$current[which(is.na(lst_df$current))] <- 0
+lst_df$future[which(is.na(lst_df$future))] <- 0
+lst_df$future_sp[which(is.na(lst_df$future_sp))] <- 0
 
+cor.test(na.omit(lst_df)$future,na.omit(lst_df)$future_sp)$estimate^2
+
+
+
+
+(
+  ind_sp_comparison <- ggplot(data = lst_df) +
+    geom_point(aes(x=future, y = future_sp), alpha = 1, size = 3)+
+    geom_abline(slope = 1, intercept = 0,linetype="dashed",color="grey")+
+    #scale_fill_viridis_c(option = "A") +
+    xlab("") + 
+    ylab("") +
+    theme_linedraw()+
+    theme_classic()
+)
 (
   lst_map <- ggplot(data = lst_df) +
     geom_raster(aes(x = x, y = y, fill = `mean LST`)) +
@@ -444,6 +534,7 @@ lst_df$future <- sapply(lst_df$`mean LST` + warm, getUDVal_wt, dat = pop_niche$t
       legend.position = "bottom",
       axis.text = element_text()
     )
+  + labs(fill = "")
 )
 (
   lst_map_current <- ggplot(data = lst_df) +
@@ -456,6 +547,7 @@ lst_df$future <- sapply(lst_df$`mean LST` + warm, getUDVal_wt, dat = pop_niche$t
       legend.position = "bottom",
       axis.text = element_text()
     )
+  + labs(fill = "")
 )
 (
   lst_map_future <- ggplot(data = lst_df) +
@@ -467,8 +559,39 @@ lst_df$future <- sapply(lst_df$`mean LST` + warm, getUDVal_wt, dat = pop_niche$t
       #axis.ticks = element_line(linewidth = 1),
       axis.text = element_text()
     )
+  + labs(fill = "")
 )
+(
+  lst_map_future_sp <- ggplot(data = lst_df) +
+    geom_raster(aes(x = x, y = y, fill = `future_sp`)) +
+    scale_fill_viridis_c(option = "A") +
+    theme_void() +
+    theme(
+      legend.position = "bottom",
+      #axis.ticks = element_line(linewidth = 1),
+      axis.text = element_text()
+    )
+    + labs(fill = "")
+)
+(
+  lst_map_future_delta <- ggplot(data = lst_df) +
+    geom_raster(aes(x = x, y = y, fill = `future_delta`)) +
+    #scale_colour_continuous_diverging(palette = "Blue-Red 3") +
+    theme_void() +
+    theme(
+      legend.position = "bottom",
+      #axis.ticks = element_line(linewidth = 1),
+      axis.text = element_text()
+    )
+  + labs(fill = "")
+  + scale_fill_continuous_diverging(mid = 0)
+)
+
 
 ggsave(filename = paste0("out/figs/",sp_name,"_mean_lst.png"), lst_map, height = fig_h, width = fig_w)
 ggsave(filename = paste0("out/figs/",sp_name,"_current_pop_suit.png"), lst_map_current, height = fig_h, width = fig_w)
 ggsave(filename = paste0("out/figs/",sp_name,"_future_pop_suit.png"), lst_map_future, height = fig_h, width = fig_w)
+ggsave(filename = paste0("out/figs/",sp_name,"_future_pop_sp_suit.png"), lst_map_future_sp, height = fig_h, width = fig_w)
+ggsave(filename = paste0("out/figs/",sp_name,"_future_delta_suit.png"), lst_map_future_delta, height = fig_h, width = fig_w)
+ggsave(filename = paste0("out/figs/",sp_name,"_sp_ind_comparison.png"), ind_sp_comparison, height = fig_h, width = fig_w)
+
